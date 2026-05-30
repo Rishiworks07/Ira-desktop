@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+dist-electron/
+release/
+
+# Test coverage
+coverage/
+
+# OS artifacts
+.DS_Store
+*.log
+
+# Environment variables (never commit secrets)
+.env*
+!.env.example

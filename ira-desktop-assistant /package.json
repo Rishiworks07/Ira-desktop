@@ -1,0 +1,91 @@
+{
+  "name": "ira-desktop-assistant",
+  "productName": "IRA",
+  "private": true,
+  "version": "1.0.0",
+  "description": "IRA — Ambient AI Desktop Assistant",
+  "type": "module",
+  "main": "dist-electron/electron/main.js",
+  "scripts": {
+    "dev:vite": "vite",
+    "dev:electron": "wait-on tcp:5173 && cross-env NODE_ENV=development electron . --no-sandbox",
+    "dev": "concurrently --kill-others \"npm run dev:vite\" \"npm run dev:electron\"",
+    "build:vite": "vite build",
+    "build:electron": "tsc --project tsconfig.electron.json",
+    "build": "npm run build:vite && npm run build:electron",
+    "dist": "npm run build && electron-builder",
+    "dist:linux": "npm run build && electron-builder --linux",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:win": "npm run build && electron-builder --win",
+    "server": "tsx server.ts",
+    "clean": "rm -rf dist dist-electron",
+    "lint": "tsc --noEmit"
+  },
+  "build": {
+    "appId": "com.ira.desktop",
+    "productName": "IRA",
+    "copyright": "Copyright © 2026 IRA",
+    "icon": "assets/icon",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "!node_modules",
+      ".env"
+    ],
+    "extraResources": [
+      {
+        "from": ".env",
+        "to": ".env"
+      }
+    ],
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.productivity"
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Utility"
+    }
+  },
+  "dependencies": {
+    "@google/genai": "^2.4.0",
+    "@tailwindcss/vite": "^4.1.14",
+    "@vitejs/plugin-react": "^5.0.4",
+    "dotenv": "^17.2.3",
+    "express": "^4.21.2",
+    "lucide-react": "^0.546.0",
+    "motion": "^12.23.24",
+    "react": "^19.0.1",
+    "react-dom": "^19.0.1",
+    "vite": "^6.2.3"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.14.0",
+    "autoprefixer": "^10.4.21",
+    "concurrently": "^9.1.2",
+    "cross-env": "^7.0.3",
+    "electron": "^36.3.0",
+    "electron-builder": "^26.0.12",
+    "esbuild": "^0.25.0",
+    "tailwindcss": "^4.1.14",
+    "tsx": "^4.21.0",
+    "typescript": "~5.8.2",
+    "wait-on": "^8.0.3"
+  }
+}

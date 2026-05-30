@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>IRA — Floating Orb</title>
+    <!-- Transparent, no scrollbars -->
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body, #orb-root {
+        width: 100%;
+        height: 100%;
+        background: transparent !important;
+        background-color: transparent !important;
+        overflow: hidden;
+        -webkit-app-region: no-drag;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="orb-root"></div>
+    <script type="module" src="/src/orb-main.tsx"></script>
+  </body>
+</html>
