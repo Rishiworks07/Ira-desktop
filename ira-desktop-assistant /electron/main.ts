@@ -53,6 +53,7 @@ dotenv.config({ path: path.join(projectRoot, '.env') });
 
 let orbWindow: BrowserWindow | null = null;
 let mainWindow: BrowserWindow | null = null;
+let commandBarWindow: BrowserWindow | null = null; // Linux-only: hidden popup
 
 // ─── Gemini AI Setup ──────────────────────────────────────────────────────────
 let ai: GoogleGenAI | null = null;
@@ -285,10 +286,8 @@ ipcMain.handle('open-main-window', () => {
 // Expanded window = exactly fits the card + shadow padding.
 // Clicking outside the physical window goes straight to other apps.
 const ORB_W = 72;         // px — orb window (80px orb + 4px padding each side)
-// Expanded: always use full screen width — the card is centered via CSS max-width.
-// This guarantees the OS window is never narrower than the card on any monitor.
-const BAR_H = 520;        // px — window height when expanded (extra for top padding)
-const SHADOW = 32;        // px — transparent padding for box-shadow breathing room
+const BAR_H = 420;        // px — expanded height (generous for all content)
+const SHADOW = 24;         // px — transparent padding for CSS box-shadow
 
 let orbExpanded = false; // track expansion state in main process
 
@@ -314,69 +313,36 @@ function startOrbHoverCheck() {
   }, 40);
 }
 
-const EXPANDED_W = 1000;
-let collapsedBounds = { x: 0, y: 0, width: ORB_W, height: ORB_W };
-
-function applyOrbBounds(isExpanded: boolean, _position: string) {
+function applyOrbBounds(isExpanded: boolean, position: string) {
   if (!orbWindow || orbWindow.isDestroyed()) return;
   const { width: sw, height: sh } = screen.getPrimaryDisplay().workAreaSize;
-  const currentBounds = orbWindow.getBounds();
 
+  // Expanded window is full work-area width so bar is never clipped
+  const newW = isExpanded ? sw : ORB_W;
+  const newH = isExpanded ? BAR_H + SHADOW : ORB_W;
+  const nx = isExpanded ? 0 : (position.includes('left') ? 0 : sw - ORB_W);
+  const ny = isExpanded ? sh - newH : (position.includes('top') ? 0 : sh - ORB_W);
+
+  orbWindow.setBounds({ x: nx, y: Math.max(0, ny), width: newW, height: newH });
+
+  // When expanded, always interactive. When collapsed, hover-check handles it.
   if (isExpanded) {
-    // 1. Save the EXACT position of the orb so we can restore it on collapse
-    // Only save if we are currently small (orb size), otherwise we'd overwrite it
-    if (currentBounds.width <= ORB_W + 10) {
-      collapsedBounds = { ...currentBounds };
-    }
-
-    const newW = EXPANDED_W;
-    const newH = BAR_H + SHADOW;
-
-    // 2. Expand naturally from the orb's current position
-    // Center the expanded UI over the orb horizontally
-    let nx = collapsedBounds.x + (collapsedBounds.width / 2) - (newW / 2);
-    
-    // Keep it on the screen (prevent horizontal clipping)
-    if (nx < 0) nx = 0;
-    if (nx + newW > sw) nx = sw - newW;
-
-    // Expand vertically based on whether the orb is in the top or bottom half
-    let ny;
-    const isBottomHalf = (collapsedBounds.y + collapsedBounds.height / 2) > (sh / 2);
-    if (isBottomHalf) {
-      // Expand upwards
-      ny = collapsedBounds.y + collapsedBounds.height - newH;
-    } else {
-      // Expand downwards
-      ny = collapsedBounds.y;
-    }
-
-    // Keep it on the screen (prevent vertical clipping)
-    if (ny < 0) ny = 0;
-    if (ny + newH > sh) ny = sh - newH;
-
-    // Use setMinimumSize before setBounds to force aggressive window managers to accept the resize
-    orbWindow.setMinimumSize(newW, newH);
-    orbWindow.setBounds({ x: Math.round(nx), y: Math.round(ny), width: newW, height: newH });
     orbWindow.setIgnoreMouseEvents(false);
   } else {
-    // 3. Restore the orb to its exact pre-expanded position
-    orbWindow.setMinimumSize(ORB_W, ORB_W);
-    orbWindow.setBounds({
-      x: collapsedBounds.x,
-      y: collapsedBounds.y,
-      width: ORB_W,
-      height: ORB_W
-    });
-    orbWindow.setIgnoreMouseEvents(true); // Hover-check takes over
+    orbWindow.setIgnoreMouseEvents(true); // hover-check will flip this as needed
   }
 }
 
 ipcMain.on('orb-toggled', (_event, isExpanded: boolean, position: string = 'bottom-right') => {
   orbExpanded = isExpanded;
+  // macOS / Windows: resize the orb window
   if (orbWindow && !orbWindow.isDestroyed()) {
     orbWindow.setAlwaysOnTop(true, 'screen-saver');
     applyOrbBounds(isExpanded, position);
+  }
+  // Linux: hide the command bar window when user presses Esc
+  if (!isExpanded && commandBarWindow && !commandBarWindow.isDestroyed()) {
+    commandBarWindow.hide();
   }
 });
 
@@ -423,6 +389,7 @@ ipcMain.on('set-click-through', (_event, enabled: boolean) => {
 // Monica-style: the window starts at orb size (100x100).
 // When the user expands the bar, the window resizes to full-width strip.
 // Clicks outside the physical window go straight to other apps on ALL platforms.
+// NOTE: This window is NOT created on Linux — use createCommandBarWindow() instead.
 function createOrbWindow() {
   const { width: sw, height: sh } = screen.getPrimaryDisplay().workAreaSize;
 
@@ -446,7 +413,7 @@ function createOrbWindow() {
     alwaysOnTop: true,
     skipTaskbar: true,
     type: 'panel',
-    resizable: true,
+    resizable: false,
     hasShadow: false,
     focusable: true,
     webPreferences: {
@@ -477,6 +444,58 @@ function createOrbWindow() {
   });
 
   orbWindow.on('closed', () => { orbWindow = null; });
+}
+
+// ─── Create Linux Command Bar Window ──────────────────────────────────────────
+// On Linux, IRA has NO visible orb. It runs fully hidden in the background.
+// Pressing Ctrl+Space creates/shows this centered popup window.
+// It auto-hides when it loses focus or the user presses Escape.
+function createCommandBarWindow() {
+  const { width: sw, height: sh } = screen.getPrimaryDisplay().workAreaSize;
+
+  // Command bar dimensions: wide card centered on screen
+  const BAR_WIN_W = 680;
+  const BAR_WIN_H = 380;
+
+  commandBarWindow = new BrowserWindow({
+    width: BAR_WIN_W,
+    height: BAR_WIN_H,
+    x: Math.round((sw - BAR_WIN_W) / 2),
+    y: Math.round((sh - BAR_WIN_H) / 3), // slightly above center feels more natural
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    resizable: false,
+    hasShadow: false,
+    show: false,         // starts hidden — only shown by shortcut
+    focusable: true,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+
+  commandBarWindow.setAlwaysOnTop(true, 'screen-saver', 1);
+  commandBarWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+
+  if (isDev) {
+    commandBarWindow.loadURL('http://localhost:5173/orb.html');
+  } else {
+    commandBarWindow.loadFile(path.join(__dirname, '../dist/orb.html'));
+  }
+
+  // Auto-hide on blur: clicking anywhere outside dismisses it
+  commandBarWindow.on('blur', () => {
+    if (commandBarWindow && !commandBarWindow.isDestroyed()) {
+      commandBarWindow.hide();
+      commandBarWindow.webContents.send('window-blurred');
+    }
+  });
+
+  commandBarWindow.on('closed', () => { commandBarWindow = null; });
 }
 
 // ─── Create Main Workspace Window ─────────────────────────────────────────────
@@ -512,23 +531,81 @@ function createMainWindow() {
 
 // ─── App Lifecycle ─────────────────────────────────────────────────────────────
 app.whenReady().then(() => {
-  createOrbWindow();
+  const isLinux = process.platform === 'linux';
 
-  // Global shortcut: Ctrl+Space to toggle the orb's command bar (expand/collapse)
-  globalShortcut.register('CommandOrControl+Space', () => {
-    if (!orbWindow || orbWindow.isDestroyed()) return;
+  if (isLinux) {
+    // ── Linux mode: no orb, run fully in the background ──────────────────────
+    // Pre-create the command bar window (hidden) so first open is instant.
+    createCommandBarWindow();
 
-    // Make sure window is visible and on top before sending toggle
-    orbWindow.show();
-    orbWindow.setAlwaysOnTop(true, 'screen-saver', 1);
+    // Ctrl+Space: show or hide the command bar window
+    const shortcutKey = 'CommandOrControl+Space';
+    const registered = globalShortcut.register(shortcutKey, () => {
+      console.log('[IRA] Ctrl+Space fired');
 
-    // Tell the React frontend to expand/collapse the command bar
-    orbWindow.webContents.send('toggle-command-bar');
-  });
+      if (!commandBarWindow || commandBarWindow.isDestroyed()) {
+        console.log('[IRA] commandBarWindow gone — recreating');
+        createCommandBarWindow();
+        // Wait for page load before showing
+        commandBarWindow!.once('ready-to-show', () => {
+          commandBarWindow!.show();
+          commandBarWindow!.focus();
+          commandBarWindow!.setAlwaysOnTop(true, 'screen-saver', 1);
+          commandBarWindow!.webContents.send('toggle-command-bar');
+        });
+        return;
+      }
 
-  app.on('activate', () => {
-    if (!orbWindow) createOrbWindow();
-  });
+      if (commandBarWindow.isVisible()) {
+        // Already open — hide it (acts as a toggle)
+        console.log('[IRA] hiding command bar');
+        commandBarWindow.hide();
+        commandBarWindow.webContents.send('window-blurred');
+      } else {
+        // Re-center on screen in case display layout changed
+        const { width: sw, height: sh } = screen.getPrimaryDisplay().workAreaSize;
+        const BAR_WIN_W = 680;
+        const BAR_WIN_H = 380;
+        console.log(`[IRA] showing command bar at center (${sw}x${sh})`);
+        commandBarWindow.setBounds({
+          x: Math.round((sw - BAR_WIN_W) / 2),
+          y: Math.round((sh - BAR_WIN_H) / 3),
+          width: BAR_WIN_W,
+          height: BAR_WIN_H,
+        });
+        commandBarWindow.show();
+        commandBarWindow.focus();
+        commandBarWindow.setAlwaysOnTop(true, 'screen-saver', 1);
+        // Tell React to reset input state for a fresh open
+        commandBarWindow.webContents.send('toggle-command-bar');
+      }
+    });
+
+    if (registered) {
+      console.log(`✓ Global shortcut registered: ${shortcutKey}`);
+    } else {
+      console.error(`✗ Failed to register global shortcut: ${shortcutKey} — it may be grabbed by another app`);
+    }
+  } else {
+    // ── macOS / Windows mode: floating orb ───────────────────────────────────
+    createOrbWindow();
+
+    // Global shortcut: Ctrl+Space to toggle the orb's command bar (expand/collapse)
+    globalShortcut.register('CommandOrControl+Space', () => {
+      if (!orbWindow || orbWindow.isDestroyed()) return;
+
+      // Make sure window is visible and on top before sending toggle
+      orbWindow.show();
+      orbWindow.setAlwaysOnTop(true, 'screen-saver', 1);
+
+      // Tell the React frontend to expand/collapse the command bar
+      orbWindow.webContents.send('toggle-command-bar');
+    });
+
+    app.on('activate', () => {
+      if (!orbWindow) createOrbWindow();
+    });
+  }
 });
 
 app.on('window-all-closed', () => {

@@ -42,6 +42,8 @@ const QUICK_ACTIONS = [
 ];
 
 export default function StandaloneOrb({ config }: Props) {
+  const isLinux = window.electronAPI?.platform === 'linux';
+
   const [iraState, setIraState]             = useState<IraState>('idle');
   const [isExpanded, setIsExpanded]         = useState(false);
   const [commandInput, setCommandInput]     = useState('');
@@ -54,13 +56,33 @@ export default function StandaloneOrb({ config }: Props) {
 
   // ── Bootstrap ────────────────────────────────────────────────────────────────
   useEffect(() => {
-    const cleanup = window.electronAPI?.onToggleCommandBar(() => setIsExpanded(prev => !prev));
+    // On Linux the window is always showing the command bar — toggle-command-bar
+    // fires each time the window is shown, so we use it to auto-focus the input.
+    const cleanup = window.electronAPI?.onToggleCommandBar(() => {
+      if (isLinux) {
+        // Reset state for each fresh open
+        setIraState('idle');
+        setCommandInput('');
+        setSpokenFeedback(null);
+        setHistoryIdx(-1);
+        setTimeout(() => inputRef.current?.focus(), 80);
+      } else {
+        setIsExpanded(prev => !prev);
+      }
+    });
     window.electronAPI?.loadHistory().then(h => { if (Array.isArray(h)) setHistory(h); });
+
+    // On Linux, focus the input immediately on first mount (window is already visible)
+    if (isLinux) {
+      setTimeout(() => inputRef.current?.focus(), 120);
+    }
+
     return () => { cleanup?.(); };
   }, []);
 
-  // ── Expansion side effects ───────────────────────────────────────────────────
+  // ── Expansion side effects (non-Linux only) ──────────────────────────────────
   useEffect(() => {
+    if (isLinux) return; // Linux: window visibility is managed by main process
     const pos = config.orb_position || 'bottom-right';
     if (isExpanded) {
       window.electronAPI?.orbToggled(true, pos);
@@ -71,22 +93,41 @@ export default function StandaloneOrb({ config }: Props) {
     }
   }, [isExpanded]);
 
-  const collapse = () => setIsExpanded(false);
+  const collapse = () => {
+    if (isLinux) {
+      // On Linux, hide is handled by Electron (blur). We just reset UI state.
+      setIraState('idle');
+      setCommandInput('');
+      setSpokenFeedback(null);
+    } else {
+      setIsExpanded(false);
+    }
+  };
 
   // ── Global ESC & Blur ─────────────────────────────────────────────────────────
   useEffect(() => {
-    const onKey = (e: globalThis.KeyboardEvent) => { if (e.key === 'Escape' && isExpanded) collapse(); };
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (isLinux) {
+          // On Linux: tell main to hide the window
+          window.electronAPI?.orbToggled(false, 'bottom-right');
+          collapse();
+        } else if (isExpanded) {
+          collapse();
+        }
+      }
+    };
     window.addEventListener('keydown', onKey);
 
     const cleanupBlur = window.electronAPI?.onWindowBlurred(() => {
-      if (isExpanded) collapse();
+      collapse();
     });
 
     return () => {
       window.removeEventListener('keydown', onKey);
       cleanupBlur?.();
     };
-  }, [isExpanded]);
+  }, [isExpanded, isLinux]);
 
   // ── History nav ──────────────────────────────────────────────────────────────
   const handleKeyNav = (e: KeyboardEvent<HTMLInputElement>) => {
@@ -148,6 +189,88 @@ export default function StandaloneOrb({ config }: Props) {
   const gradient = getOrbGradient(config.theme);
   const shadow   = getOrbShadow(config.theme);
   const isBottom = (config.orb_position || 'bottom-right').startsWith('bottom');
+
+  // ── Linux: render only the command bar (no orb) ──────────────────────────────
+  if (isLinux) {
+    return (
+      <div className="w-full h-full font-sans select-none flex items-center justify-center" style={{ background: 'transparent', padding: 20 }}>
+        <div className="w-full rounded-[20px] border border-white/[0.06]"
+          style={{ background: '#0F111A', boxShadow: '0 24px 64px rgba(0,0,0,0.85)' }}>
+          <div className="p-5 flex flex-col gap-4">
+
+            {/* Header */}
+            <div className="flex items-center gap-3 px-1">
+              <Sparkles className="w-4 h-4 text-indigo-400" />
+              <span className="text-xs font-bold tracking-widest uppercase text-zinc-500">IRA — Ask me anything</span>
+              <kbd className="ml-auto px-2 py-0.5 bg-white/[0.04] border border-white/[0.08] rounded text-zinc-400 text-[10px]">Esc to close</kbd>
+            </div>
+
+            {/* Input row */}
+            <form onSubmit={handleSubmit}
+              className="flex items-center gap-4 rounded-xl px-4 py-3"
+              style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)' }}>
+              <Command className="w-5 h-5 text-indigo-300 flex-shrink-0" />
+              <input
+                ref={inputRef}
+                type="text"
+                value={commandInput}
+                onChange={e => setCommandInput(e.target.value)}
+                onKeyDown={handleKeyNav}
+                placeholder={`Hi ${config.user_name || 'there'}, ask me anything…`}
+                className="flex-1 bg-transparent text-base text-zinc-300 placeholder-zinc-600 outline-none min-w-0"
+                autoComplete="off"
+              />
+              <button type="submit"
+                disabled={!commandInput.trim() || iraState === 'processing'}
+                className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/25 text-indigo-300 text-[11px] font-bold tracking-wide uppercase transition-all disabled:opacity-40 disabled:cursor-not-allowed flex-shrink-0">
+                {iraState === 'processing'
+                  ? <RefreshCw className="w-4 h-4 animate-spin" />
+                  : <><span>Run</span><CornerDownLeft className="w-3.5 h-3.5" /></>}
+              </button>
+            </form>
+
+            {/* IRA response */}
+            <AnimatePresence>
+              {spokenFeedback && iraState !== 'processing' && (
+                <motion.div key="resp"
+                  initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}
+                  className={`px-4 py-3 rounded-xl overflow-hidden text-sm text-zinc-200 leading-relaxed border ${iraState === 'error' ? 'border-red-500/20' : 'border-indigo-500/20'}`}
+                  style={{ background: iraState === 'error' ? 'rgba(239,68,68,0.06)' : 'rgba(99,102,241,0.06)' }}>
+                  <span className="font-semibold text-indigo-400">IRA: </span>{spokenFeedback}
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            {/* Quick actions */}
+            {iraState !== 'processing' && (
+              <div>
+                <p className="text-[11px] uppercase font-bold tracking-[0.1em] text-zinc-500 mb-2 px-1">Quick actions</p>
+                <div className="grid grid-cols-3 gap-2">
+                  {QUICK_ACTIONS.map(({ label, example, Icon, color }) => (
+                    <button key={label} type="button" onClick={() => { setCommandInput(example); setTimeout(() => inputRef.current?.focus(), 50); }}
+                      className="group p-2.5 rounded-xl transition-all text-left cursor-pointer flex flex-row items-center gap-3 border"
+                      style={{ background: 'rgba(255,255,255,0.01)', borderColor: 'rgba(255,255,255,0.04)' }}
+                      onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.03)')}
+                      onMouseLeave={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.01)')}>
+                      <span className={`w-8 h-8 rounded-lg border ${color} flex items-center justify-center flex-shrink-0 transition-transform group-hover:scale-105`}>
+                        <Icon className="w-3.5 h-3.5" strokeWidth={2.5} />
+                      </span>
+                      <div className="min-w-0">
+                        <p className="text-[12px] font-bold text-zinc-200 group-hover:text-white transition-colors truncate">{label}</p>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── macOS / Windows: orb + expandable command bar ────────────────────────────
 
   return (
     <div className="w-full h-full font-sans select-none" style={{ background: 'transparent' }}>
@@ -238,23 +361,23 @@ export default function StandaloneOrb({ config }: Props) {
             exit={{ opacity: 0, y: isBottom ? 10 : -10 }}
             transition={{ type: 'spring', stiffness: 320, damping: 28 }}
           >
-            {/* Single unified dark panel — fills the window with same background color */}
-            <div className="flex items-stretch justify-center w-full h-full p-8">
-            {/* Card — fills available space, same dark color */}
+            {/* 24px padding gives shadow room within the transparent window */}
+            <div className="w-full h-full" style={{ padding: 24 }}>
+            {/* Card */}
             <div
-              className="rounded-[24px] border border-white/[0.07] w-full h-full"
+              className="rounded-[20px] border border-white/[0.06]"
               style={{
                 background: '#0F111A',
-                boxShadow: '0 -8px 48px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.04)',
+                boxShadow: '0 24px 64px rgba(0,0,0,0.7)',
               }}
             >
-              <div className="px-10 py-10 flex flex-col gap-8 h-full justify-center">
+              <div className="p-6 flex flex-col gap-5">
 
                 {/* Input row */}
                 <form onSubmit={handleSubmit}
-                  className="flex items-center gap-5 rounded-2xl px-6 py-5"
+                  className="flex items-center gap-4 rounded-xl px-4 py-3"
                   style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)' }}>
-                  <Command className="w-7 h-7 text-indigo-300 flex-shrink-0" />
+                  <Command className="w-5 h-5 text-indigo-300 flex-shrink-0" />
                   <input
                     ref={inputRef}
                     type="text"
@@ -262,15 +385,15 @@ export default function StandaloneOrb({ config }: Props) {
                     onChange={e => setCommandInput(e.target.value)}
                     onKeyDown={handleKeyNav}
                     placeholder={`Hi ${config.user_name || 'there'}, ask me anything…`}
-                    className="flex-1 bg-transparent text-xl text-zinc-300 placeholder-zinc-500 outline-none min-w-0"
+                    className="flex-1 bg-transparent text-base text-zinc-300 placeholder-zinc-600 outline-none min-w-0"
                     autoComplete="off"
                   />
                   <button type="submit"
                     disabled={!commandInput.trim() || iraState === 'processing'}
-                    className="flex items-center gap-3 px-4 py-2.5 rounded-xl bg-indigo-500/15 hover:bg-indigo-500/25 text-indigo-300 text-sm font-bold tracking-wide uppercase transition-all disabled:opacity-40 disabled:cursor-not-allowed flex-shrink-0">
+                    className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/25 text-indigo-300 text-[11px] font-bold tracking-wide uppercase transition-all disabled:opacity-40 disabled:cursor-not-allowed flex-shrink-0">
                     {iraState === 'processing'
-                      ? <RefreshCw className="w-5 h-5 animate-spin" />
-                      : <><span>Run</span><CornerDownLeft className="w-4 h-4" /></>}
+                      ? <RefreshCw className="w-4 h-4 animate-spin" />
+                      : <><span>Run</span><CornerDownLeft className="w-3.5 h-3.5" /></>}
                   </button>
                 </form>
 
@@ -279,7 +402,7 @@ export default function StandaloneOrb({ config }: Props) {
                   {spokenFeedback && iraState !== 'processing' && (
                     <motion.div key="resp"
                       initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}
-                      className={`px-6 py-5 rounded-2xl overflow-hidden text-lg text-zinc-200 leading-relaxed border ${iraState === 'error' ? 'border-red-500/20' : 'border-indigo-500/20'}`}
+                      className={`px-4 py-3 rounded-xl overflow-hidden text-sm text-zinc-200 leading-relaxed border ${iraState === 'error' ? 'border-red-500/20' : 'border-indigo-500/20'}`}
                       style={{ background: iraState === 'error' ? 'rgba(239,68,68,0.06)' : 'rgba(99,102,241,0.06)' }}>
                       <span className="font-semibold text-indigo-400">IRA: </span>{spokenFeedback}
                     </motion.div>
@@ -289,20 +412,20 @@ export default function StandaloneOrb({ config }: Props) {
                 {/* Quick actions */}
                 {iraState !== 'processing' && (
                   <div>
-                    <p className="text-sm uppercase font-bold tracking-[0.15em] text-zinc-500 mb-4 px-2">Quick actions</p>
-                    <div className="grid grid-cols-3 gap-5">
+                    <p className="text-[11px] uppercase font-bold tracking-[0.1em] text-zinc-500 mb-3 px-1">Quick actions</p>
+                    <div className="grid grid-cols-3 gap-3">
                       {QUICK_ACTIONS.map(({ label, example, Icon, color }) => (
                         <button key={label} type="button" onClick={() => setCommandInput(example)}
-                          className="group p-5 rounded-2xl transition-all text-left cursor-pointer flex flex-row items-center gap-4 border"
+                          className="group p-3 rounded-xl transition-all text-left cursor-pointer flex flex-row items-center gap-3.5 border"
                           style={{ background: 'rgba(255,255,255,0.01)', borderColor: 'rgba(255,255,255,0.04)' }}
                           onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.03)')}
                           onMouseLeave={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.01)')}>
-                          <span className={`w-14 h-14 rounded-2xl border ${color} flex items-center justify-center flex-shrink-0 transition-transform group-hover:scale-105`}>
-                            <Icon className="w-6 h-6" strokeWidth={2.5} />
+                          <span className={`w-10 h-10 rounded-xl border ${color} flex items-center justify-center flex-shrink-0 transition-transform group-hover:scale-105`}>
+                            <Icon className="w-4 h-4" strokeWidth={2.5} />
                           </span>
                           <div className="min-w-0">
-                            <p className="text-base font-bold text-zinc-200 group-hover:text-white transition-colors truncate tracking-wide">{label}</p>
-                            <p className="text-sm text-zinc-500 truncate mt-1">"{example.slice(0, 18)}…"</p>
+                            <p className="text-[13px] font-bold text-zinc-200 group-hover:text-white transition-colors truncate tracking-wide">{label}</p>
+                            <p className="text-[11px] text-zinc-500 truncate mt-0.5">"{example.slice(0, 18)}…"</p>
                           </div>
                         </button>
                       ))}
@@ -311,20 +434,20 @@ export default function StandaloneOrb({ config }: Props) {
                 )}
 
                 {/* Footer */}
-                <div className="flex justify-between items-center pt-3 border-t border-white/[0.04] px-2">
-                  <div className="flex items-center gap-6 text-sm text-zinc-500 font-medium">
-                    <span className="flex items-center gap-3">
-                      <kbd className="px-3 py-1.5 bg-white/[0.04] border border-white/[0.08] rounded-md text-zinc-300 text-xs">Esc</kbd>
+                <div className="flex justify-between items-center pt-1 border-t border-white/[0.04] px-1">
+                  <div className="flex items-center gap-4 text-xs text-zinc-500 font-medium">
+                    <span className="flex items-center gap-2">
+                      <kbd className="px-2 py-1 bg-white/[0.04] border border-white/[0.08] rounded-md text-zinc-300 text-[11px]">Esc</kbd>
                       close
                     </span>
-                    <span className="flex items-center gap-3">
-                      <kbd className="px-2.5 py-1.5 bg-white/[0.04] border border-white/[0.08] rounded-md text-zinc-300 text-xs">↑↓</kbd>
+                    <span className="flex items-center gap-2">
+                      <kbd className="px-1.5 py-1 bg-white/[0.04] border border-white/[0.08] rounded-md text-zinc-300 text-[11px]">↑↓</kbd>
                       history
                     </span>
                   </div>
                   <button type="button" onClick={handleOpenManage}
-                    className="flex items-center gap-2 text-sm text-zinc-400 hover:text-white font-medium transition-colors">
-                    <Settings2 className="w-5 h-5" /> Settings
+                    className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-white font-medium transition-colors">
+                    <Settings2 className="w-3.5 h-3.5" /> Settings
                   </button>
                 </div>
 
